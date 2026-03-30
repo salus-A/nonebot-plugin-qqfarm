@@ -55,7 +55,7 @@
 
 提供两种安装方式：
 
-· 方法一（推荐）：
+· 方法一（目前不支持）：
   ```bash
   nb plugin install nonebot-plugin-qqfarm
   ```
