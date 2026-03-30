@@ -4,17 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nonebot-plugin-qqfarm"
-version = "1.0.0"
+version = "1.0.1"
 description = "QQ农场自动化助手 - NoneBot插件，支持账号管理、自动操作、离线通知、Webhook推送"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [
-    {name = "Your Name", email = "salus814@163.com"}
+    {name = "salus-A", email = "salus814@163.com"}
 ]
 keywords = ["nonebot", "qqfarm", "qq", "farm", "automation"]
 classifiers = [
     "Development Status :: 4 - Beta",
-    "Framework :: NoneBot",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.9",
@@ -42,4 +41,3 @@ plugins = ["nonebot_plugin_qqfarm"]
 
 [tool.setuptools.packages.find]
 include = ["nonebot_plugin_qqfarm*"]
-exclude = ["tests*"]
