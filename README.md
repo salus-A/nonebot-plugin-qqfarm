@@ -162,7 +162,7 @@ Content-Type: application/json
 
 ## 💬 社区支持
 
-如有问题或建议，欢迎提交 GitHub Issue 或加入交流群（QQ 群：1084498190）。
+如有问题或建议，欢迎提交 GitHub Issue 或加入交流群（QQ 群：227916149）。
 
 ## 📄 开源协议
 
