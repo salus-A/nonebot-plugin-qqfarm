@@ -65,33 +65,41 @@
   ```
   若使用方法二，还需在 pyproject.toml 中手动添加插件名：
   ```toml
+  [tool.nonebot.plugins]
   plugins = ["nonebot_plugin_qqfarm"]
   ```
   
 ---
 
-**3. 配置示例**
-
-```markdown
 ## ⚙️ 配置示例
 
 在 NoneBot 项目的 `.env` 文件中添加以下配置（使用 `NONEBOT_PLUGIN_QQFARM_` 前缀）：
 
 ```env
-```
-# 必填
+# ========== 必填配置 ==========
+# 后端 API 基础地址
 NONEBOT_PLUGIN_QQFARM_BASE_URL=https://your-backend.com
+# 管理员认证密码
 NONEBOT_PLUGIN_QQFARM_ADMIN_PASSWORD=your_password
+
+# 数据库主机地址
 NONEBOT_PLUGIN_QQFARM_DATABASE__HOST=localhost
+# 数据库端口
 NONEBOT_PLUGIN_QQFARM_DATABASE__PORT=3306
+# 数据库用户名
 NONEBOT_PLUGIN_QQFARM_DATABASE__USER=root
+# 数据库密码
 NONEBOT_PLUGIN_QQFARM_DATABASE__PASSWORD=your_db_password
+# 数据库名称
 NONEBOT_PLUGIN_QQFARM_DATABASE__DATABASE=qq_farm_bot
+# 管理员 QQ 号列表（JSON 数组格式）
 NONEBOT_PLUGIN_QQFARM_ADMIN_QQ=[123456789]
+# 默认推送群组，多个用英文逗号分隔
 NONEBOT_PLUGIN_QQFARM_DEFAULT_GROUP=1060330308,1084498190
+# 全局 Webhook 接收地址
 NONEBOT_PLUGIN_QQFARM_WEBHOOK_URL=https://webhook.your-domain.com
 ```
-
+注意:如果需要使用域名作为webhook接收地址需要设置反代
 ---
 
 **4. 使用命令**
@@ -150,10 +158,11 @@ Content-Type: application/json
 - GitHub：https://github.com/salus-A/nonebot-plugin-qqfarm
 - 后端项目：https://github.com/smdk000/qq-farm-ui-pro-max
 - 问题反馈：https://github.com/salus-A/nonebot-plugin-qqfarm/issues
+```
 
 ## 💬 社区支持
 
-如有问题或建议，欢迎提交 GitHub Issue 或加入交流群（QQ 群：待补充）。
+如有问题或建议，欢迎提交 GitHub Issue 或加入交流群（QQ 群：1084498190）。
 
 ## 📄 开源协议
 
