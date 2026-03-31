@@ -2,7 +2,7 @@
   <a href="https://github.com/salus-A/nonebot-plugin-qqfarm">
     <img src="https://github.com/user-attachments/assets/8f2b8c4a-3c1d-4e6f-9b7c-1a2b3c4d5e6f" width="200" alt="QQFarm Logo">
   </a>
-  <h1>QQ农场助手</h1>
+  <h1>nonebot-plugin-qqfarm</h1>
   <h3>本项目基于qq-farm-ui-pro-max编写</h3>
   <h4><a href="https://github.com/smdk000/qq-farm-ui-pro-max">点击前往项目</a></h4>
 
