@@ -54,7 +54,7 @@ __plugin_meta__ = PluginMetadata(
     农场帮助 [类别] - 显示帮助信息
     """,
     type="application",
-    homepage="https://github.com/yourname/qqfarm",
+    homepage="https://github.com/salus-A/nonebot-plugin-qqfarm",
     supported_adapters={"~onebot.v11"},
 )
 
