@@ -8,6 +8,7 @@ from typing import Optional, Dict, Any, List
 import httpx
 import logging
 import time
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,8 @@ class QQFarmAPI:
         self.timeout = timeout
         self.api_key = api_key
         self._client: Optional[httpx.AsyncClient] = None
+        self._api_available = True  # 简单状态标志
+        self.access_token: Optional[str] = None   # 存储登录后的 access_token
 
     async def ainit(self) -> None:
         if self._client is None:
@@ -54,6 +57,10 @@ class QQFarmAPI:
         if use_external and self.api_key:
             req_headers["X-API-Key"] = self.api_key
 
+        # 如果存在 access_token，手动添加 Cookie 头（双重保障）
+        if self.access_token:
+            req_headers["Cookie"] = f"access_token={self.access_token}"
+
         url = f"{self.base_url}{path}"
         try:
             response = await self._client.request(
@@ -78,22 +85,57 @@ class QQFarmAPI:
 
     # ========== 认证相关 ==========
     async def login(self) -> bool:
-        """使用管理员密码登录"""
-        result = await self._request(
-            "POST",
-            "/api/login",
-            json_data={"username": "admin", "password": self.admin_password},
-        )
-        if result and result.get("ok"):
-            logger.info("QQFarm API login successful")
+        """使用管理员密码登录，提取 access_token 并保存到客户端"""
+        # 使用临时客户端发送登录请求，以获取响应头中的 Set-Cookie
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                response = await client.post(
+                    f"{self.base_url}/api/login",
+                    json={"username": "admin", "password": self.admin_password}
+                )
+            except httpx.RequestError as e:
+                logger.error(f"Login request failed: {e}")
+                return False
+
+            if response.status_code != 200:
+                logger.warning(f"Login failed with status {response.status_code}")
+                return False
+
+            data = response.json()
+            if not data.get("ok"):
+                logger.warning("Login response ok=False")
+                return False
+
+            # 提取 Set-Cookie 中的 access_token
+            set_cookie = response.headers.get("set-cookie", "")
+            match = re.search(r'access_token=([^;]+)', set_cookie)
+            if not match:
+                logger.warning("No access_token found in Set-Cookie")
+                return False
+
+            self.access_token = match.group(1)
+            logger.info("QQFarm API login successful, access_token extracted")
+
+            # 创建持久客户端，并预先设置 cookies
+            await self.ainit()
+            self._client.cookies.set("access_token", self.access_token, path="/")
+            # 如果有 refresh_token，也可以一并设置（可选）
+            refresh_match = re.search(r'refresh_token=([^;]+)', set_cookie)
+            if refresh_match:
+                refresh_token = refresh_match.group(1)
+                self._client.cookies.set("refresh_token", refresh_token, path="/api/auth")
             return True
-        logger.warning("QQFarm API login failed")
-        return False
 
     async def logout(self) -> bool:
         """登出"""
         result = await self._request("POST", "/api/logout")
-        return bool(result and result.get("ok"))
+        # 登出后清除 token
+        if result and result.get("ok"):
+            self.access_token = None
+            if self._client:
+                self._client.cookies.clear()
+            return True
+        return False
 
     async def validate_token(self) -> bool:
         """验证 token 是否有效"""
@@ -119,10 +161,12 @@ class QQFarmAPI:
 
         if result and result.get("ok"):
             resp_data = result.get("data", {})
+            # 优先使用 touchedAccountId（新添加的账号ID）
             new_id = resp_data.get("touchedAccountId")
             if new_id:
                 logger.info(f"添加账号成功，后端返回 touchedAccountId: {new_id}")
                 return {"id": str(new_id), "uin": uin, "nick": nickname or "", "code": code}
+            # 兼容其他格式
             if isinstance(resp_data, dict):
                 if "id" in resp_data:
                     return {"id": str(resp_data["id"]), "uin": uin, "nick": nickname or "", "code": code}
@@ -130,13 +174,14 @@ class QQFarmAPI:
                     last = resp_data["accounts"][-1]
                     if "id" in last:
                         return {"id": str(last["id"]), "uin": uin, "nick": nickname or "", "code": code}
-            return {"id": str(int(time.time())), "uin": uin, "nick": nickname or "", "code": code}
+            return {"id": str(int(time.time())), "uin": uin, "nick": nickname or "", "code": code}  # 后备方案
         logger.warning(f"add_account failed: {result}")
         return None
 
     async def delete_account(self, account_id: str) -> bool:
         """删除农场账号"""
         result = await self._request("DELETE", f"/api/accounts/{account_id}")
+        # 兼容不同返回格式
         if result:
             if result.get("ok") is True:
                 return True
@@ -177,15 +222,6 @@ class QQFarmAPI:
             "POST",
             "/api/accounts",
             json_data={"id": account_id, "code": code}
-        )
-        return bool(result and result.get("ok"))
-
-    async def assign_account(self, account_id: str, username: str) -> bool:
-        """将账号分配给指定用户名（通过更新账号的 username 字段）"""
-        result = await self._request(
-            "POST",
-            "/api/accounts",
-            json_data={"id": account_id, "username": username}
         )
         return bool(result and result.get("ok"))
 
@@ -313,8 +349,22 @@ class QQFarmAPI:
 
     # ========== 统计相关 ==========
     async def get_analytics(self) -> Optional[Dict[str, Any]]:
-        """获取统计信息"""
-        result = await self._request("GET", "/api/analytics")
+    """获取统计信息"""
+    result = await self._request("GET", "/api/analytics")
+    if result and result.get("ok"):
+        data = result.get("data")
+        # 如果 data 是列表，尝试取第一个元素或返回空字典
+        if isinstance(data, list):
+            return data[0] if data else {}
+        return data
+    return None
+
+    async def get_stats(self) -> Optional[Dict[str, Any]]:
+        """获取统计摘要（使用外部 API）"""
+        if not self._api_available:
+            logger.warning("API not available, skipping get_stats")
+            return None
+        result = await self._request("GET", "/api/external/stats/summary", use_external=True)
         if result and result.get("ok"):
             return result.get("data")
         return None
@@ -412,12 +462,9 @@ class QQFarmAPI:
             headers={"x-account-id": account_id}
         )
         if result and result.get("ok"):
-            data = result.get("data", [])
-            if isinstance(data, list):
-                return data
-            elif isinstance(data, dict):
-                friends = data.get("friends", [])
-                return friends if isinstance(friends, list) else []
+            data = result.get("data", {})
+            friends = data.get("friends", [])
+            return friends if isinstance(friends, list) else []
         return []
 
     async def get_bag(self, account_id: str) -> List[Dict[str, Any]]:
@@ -428,12 +475,9 @@ class QQFarmAPI:
             headers={"x-account-id": account_id}
         )
         if result and result.get("ok"):
-            data = result.get("data", [])
-            if isinstance(data, list):
-                return data
-            elif isinstance(data, dict):
-                items = data.get("items", [])
-                return items if isinstance(items, list) else []
+            data = result.get("data", {})
+            items = data.get("items", [])
+            return items if isinstance(items, list) else []
         return []
 
     async def get_seeds(self, account_id: str) -> List[Dict[str, Any]]:
@@ -444,12 +488,9 @@ class QQFarmAPI:
             headers={"x-account-id": account_id}
         )
         if result and result.get("ok"):
-            data = result.get("data", [])
-            if isinstance(data, list):
-                return data
-            elif isinstance(data, dict):
-                seeds = data.get("seeds", [])
-                return seeds if isinstance(seeds, list) else []
+            data = result.get("data", {})
+            seeds = data.get("seeds", [])
+            return seeds if isinstance(seeds, list) else []
         return []
 
     async def do_farm_operation(self, account_id: str, op: str, params: Dict[str, Any] = None) -> bool:
@@ -472,5 +513,15 @@ class QQFarmAPI:
             f"/api/friend/{friend_gid}/op",
             headers={"x-account-id": account_id},
             json_data={"op": op, "amount": amount}
+        )
+        return bool(result and result.get("ok"))
+
+    # ========== 管理员分配账号 ==========
+    async def assign_account(self, account_id: str, username: str) -> bool:
+        """分配账号给指定用户（管理员接口）"""
+        result = await self._request(
+            "PUT",
+            f"/api/accounts/{account_id}/assign",
+            json_data={"username": username}
         )
         return bool(result and result.get("ok"))

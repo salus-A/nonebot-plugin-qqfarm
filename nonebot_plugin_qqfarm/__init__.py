@@ -902,45 +902,61 @@ farm_stats_cmd = on_command("农场统计", priority=10, block=True)
 
 
 @farm_stats_cmd.handle()
-async def handle_farm_stats(event: MessageEvent):
+async def handle_farm_stats(bot: Bot, event: MessageEvent):
     user_qq = int(event.user_id)
     if not await is_admin(user_qq):
         await farm_stats_cmd.finish("❌ 权限不足，仅管理员可使用此命令。")
+        return
 
     if not api:
         await farm_stats_cmd.finish("❌ API 未初始化")
+        return
 
     try:
         stats = await api.get_analytics()
         if not stats:
-            await farm_stats_cmd.finish("❌ 获取统计失败")
+            await farm_stats_cmd.finish("❌ 获取统计失败：后端返回空数据")
+            return
+
+        # 检查 stats 是否为字典，如果不是则尝试兼容或报错
+        if not isinstance(stats, dict):
+            logger.error(f"get_analytics 返回了非字典类型: {type(stats)}")
+            await farm_stats_cmd.finish(f"❌ 统计接口返回了异常数据格式（{type(stats).__name__}），请联系管理员检查后端接口。")
+            return
 
         lines = ["📊 农场统计摘要", "----------------------------------------"]
 
         accounts = stats.get("accounts", {})
-        total = accounts.get("total", 0)
-        relogin = accounts.get("reloginRequired", 0)
-        banned = accounts.get("banned", 0)
-        lines.append(f"📁 账号统计:")
-        lines.append(f"   总账号: {total}")
-        lines.append(f"   需重新登录: {relogin}")
-        lines.append(f"   已禁用: {banned}")
-        lines.append("")
+        if isinstance(accounts, dict):
+            total = accounts.get("total", 0)
+            relogin = accounts.get("reloginRequired", 0)
+            banned = accounts.get("banned", 0)
+            lines.append(f"📁 账号统计:")
+            lines.append(f"   总账号: {total}")
+            lines.append(f"   需重新登录: {relogin}")
+            lines.append(f"   已禁用: {banned}")
+            lines.append("")
+        else:
+            lines.append("📁 账号统计: 数据格式异常")
 
         buckets = stats.get("buckets", {})
-        lines.append("📈 收益统计:")
-        for period, data in buckets.items():
-            label = data.get("label", period)
-            exp = data.get("exp", 0)
-            gold = data.get("gold", 0)
-            steal = data.get("steal", 0)
-            help_count = data.get("help", 0)
-            lines.append(f"   {label}: 经验:{exp} 金币:{gold} 偷菜:{steal} 帮助:{help_count}")
+        if isinstance(buckets, dict):
+            lines.append("📈 收益统计:")
+            for period, data in buckets.items():
+                if isinstance(data, dict):
+                    label = data.get("label", period)
+                    exp = data.get("exp", 0)
+                    gold = data.get("gold", 0)
+                    steal = data.get("steal", 0)
+                    help_count = data.get("help", 0)
+                    lines.append(f"   {label}: 经验:{exp} 金币:{gold} 偷菜:{steal} 帮助:{help_count}")
+                else:
+                    lines.append(f"   {period}: 数据格式异常")
+        else:
+            lines.append("📈 收益统计: 数据格式异常")
 
         lines.append("----------------------------------------")
         await farm_stats_cmd.finish("\n".join(lines))
-    except FinishedException:
-        raise
     except Exception as e:
         logger.error(f"农场统计错误: {e}")
         await farm_stats_cmd.finish(f"❌ 获取统计失败：{str(e)}")
