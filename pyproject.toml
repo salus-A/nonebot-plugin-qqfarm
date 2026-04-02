@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nonebot-plugin-qqfarm"
-version = "1.0.6"
+version = "1.0.8"
 description = "QQ农场自动化助手 - NoneBot插件，支持账号管理、自动操作、离线通知、Webhook推送"
 readme = "README.md"
 license = {text = "MIT"}
