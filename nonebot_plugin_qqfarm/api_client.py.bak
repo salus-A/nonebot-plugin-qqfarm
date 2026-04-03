@@ -7,8 +7,8 @@ QQ Farm Bot UI API client (async)
 from typing import Optional, Dict, Any, List
 import httpx
 import logging
-import copy
 import time
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,8 @@ class QQFarmAPI:
         self.timeout = timeout
         self.api_key = api_key
         self._client: Optional[httpx.AsyncClient] = None
+        self._api_available = True  # 简单状态标志
+        self.access_token: Optional[str] = None   # 存储登录后的 access_token
 
     async def ainit(self) -> None:
         if self._client is None:
@@ -37,13 +39,6 @@ class QQFarmAPI:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
-
-    async def __aenter__(self):
-        await self.ainit()
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.close()
 
     async def _request(
         self,
@@ -62,15 +57,17 @@ class QQFarmAPI:
         if use_external and self.api_key:
             req_headers["X-API-Key"] = self.api_key
 
-        url = f"{self.base_url}{path}"
-        payload = copy.deepcopy(json_data) if json_data else None
+        # 如果存在 access_token，手动添加 Cookie 头（双重保障）
+        if self.access_token:
+            req_headers["Cookie"] = f"access_token={self.access_token}"
 
+        url = f"{self.base_url}{path}"
         try:
             response = await self._client.request(
                 method,
                 url,
                 headers=req_headers,
-                json=payload,
+                json=json_data,
             )
         except httpx.RequestError as e:
             logger.error(f"HTTP request failed: {e}")
@@ -88,27 +85,66 @@ class QQFarmAPI:
 
     # ========== 认证相关 ==========
     async def login(self) -> bool:
-        result = await self._request(
-            "POST",
-            "/api/login",
-            json_data={"username": "admin", "password": self.admin_password},
-        )
-        if result and result.get("ok"):
-            logger.info("QQFarm API login successful")
+        """使用管理员密码登录，提取 access_token 并保存到客户端"""
+        # 使用临时客户端发送登录请求，以获取响应头中的 Set-Cookie
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                response = await client.post(
+                    f"{self.base_url}/api/login",
+                    json={"username": "admin", "password": self.admin_password}
+                )
+            except httpx.RequestError as e:
+                logger.error(f"Login request failed: {e}")
+                return False
+
+            if response.status_code != 200:
+                logger.warning(f"Login failed with status {response.status_code}")
+                return False
+
+            data = response.json()
+            if not data.get("ok"):
+                logger.warning("Login response ok=False")
+                return False
+
+            # 提取 Set-Cookie 中的 access_token
+            set_cookie = response.headers.get("set-cookie", "")
+            match = re.search(r'access_token=([^;]+)', set_cookie)
+            if not match:
+                logger.warning("No access_token found in Set-Cookie")
+                return False
+
+            self.access_token = match.group(1)
+            logger.info("QQFarm API login successful, access_token extracted")
+
+            # 创建持久客户端，并预先设置 cookies
+            await self.ainit()
+            self._client.cookies.set("access_token", self.access_token, path="/")
+            # 如果有 refresh_token，也可以一并设置（可选）
+            refresh_match = re.search(r'refresh_token=([^;]+)', set_cookie)
+            if refresh_match:
+                refresh_token = refresh_match.group(1)
+                self._client.cookies.set("refresh_token", refresh_token, path="/api/auth")
             return True
-        logger.warning("QQFarm API login failed")
-        return False
 
     async def logout(self) -> bool:
+        """登出"""
         result = await self._request("POST", "/api/logout")
-        return bool(result and result.get("ok"))
+        # 登出后清除 token
+        if result and result.get("ok"):
+            self.access_token = None
+            if self._client:
+                self._client.cookies.clear()
+            return True
+        return False
 
     async def validate_token(self) -> bool:
+        """验证 token 是否有效"""
         result = await self._request("GET", "/api/auth/validate")
         return bool(result and result.get("ok"))
 
     # ========== 账号管理（内部 API）==========
     async def get_accounts(self) -> List[Dict[str, Any]]:
+        """获取所有账号列表（包含 uptime、running、connected 等完整信息）"""
         result = await self._request("GET", "/api/accounts")
         if not result or not result.get("ok"):
             return []
@@ -117,6 +153,7 @@ class QQFarmAPI:
         return accounts if isinstance(accounts, list) else []
 
     async def add_account(self, uin: str, code: str, nickname: str = None) -> Optional[Dict[str, Any]]:
+        """添加新农场账号，返回包含 id 的账号信息"""
         data = {"uin": uin, "code": code}
         if nickname:
             data["nick"] = nickname
@@ -124,10 +161,12 @@ class QQFarmAPI:
 
         if result and result.get("ok"):
             resp_data = result.get("data", {})
+            # 优先使用 touchedAccountId（新添加的账号ID）
             new_id = resp_data.get("touchedAccountId")
             if new_id:
                 logger.info(f"添加账号成功，后端返回 touchedAccountId: {new_id}")
                 return {"id": str(new_id), "uin": uin, "nick": nickname or "", "code": code}
+            # 兼容其他格式
             if isinstance(resp_data, dict):
                 if "id" in resp_data:
                     return {"id": str(resp_data["id"]), "uin": uin, "nick": nickname or "", "code": code}
@@ -135,12 +174,14 @@ class QQFarmAPI:
                     last = resp_data["accounts"][-1]
                     if "id" in last:
                         return {"id": str(last["id"]), "uin": uin, "nick": nickname or "", "code": code}
-            return {"id": str(int(time.time())), "uin": uin, "nick": nickname or "", "code": code}
+            return {"id": str(int(time.time())), "uin": uin, "nick": nickname or "", "code": code}  # 后备方案
         logger.warning(f"add_account failed: {result}")
         return None
 
     async def delete_account(self, account_id: str) -> bool:
+        """删除农场账号"""
         result = await self._request("DELETE", f"/api/accounts/{account_id}")
+        # 兼容不同返回格式
         if result:
             if result.get("ok") is True:
                 return True
@@ -149,42 +190,65 @@ class QQFarmAPI:
         return False
 
     async def start_account(self, account_id: str) -> bool:
-        result = await self._request("POST", f"/api/accounts/{account_id}/start", json_data={})
+        """启动账号"""
+        result = await self._request(
+            "POST",
+            f"/api/accounts/{account_id}/start",
+            json_data={}
+        )
         return bool(result and result.get("ok"))
 
     async def stop_account(self, account_id: str) -> bool:
-        result = await self._request("POST", f"/api/accounts/{account_id}/stop", json_data={})
+        """停止账号"""
+        result = await self._request(
+            "POST",
+            f"/api/accounts/{account_id}/stop",
+            json_data={}
+        )
         return bool(result and result.get("ok"))
 
     async def restart_account(self, account_id: str) -> bool:
-        result = await self._request("POST", f"/api/accounts/{account_id}/restart", json_data={})
+        """重启账号"""
+        result = await self._request(
+            "POST",
+            f"/api/accounts/{account_id}/restart",
+            json_data={}
+        )
         return bool(result and result.get("ok"))
 
     async def update_account_code(self, account_id: str, code: str) -> bool:
-        result = await self._request("POST", "/api/accounts", json_data={"id": account_id, "code": code})
-        return bool(result and result.get("ok"))
-
-    async def assign_account(self, account_id: str, username: str) -> bool:
-        result = await self._request("POST", "/api/accounts", json_data={"id": account_id, "username": username})
+        """更新账号 Code"""
+        result = await self._request(
+            "POST",
+            "/api/accounts",
+            json_data={"id": account_id, "code": code}
+        )
         return bool(result and result.get("ok"))
 
     async def set_account_remark(self, account_id: str, remark: str) -> bool:
+        """设置账号备注"""
         result = await self._request(
             "POST",
             "/api/account/remark",
             headers={"x-account-id": account_id},
-            json_data={"remark": remark},
+            json_data={"remark": remark}
         )
         return bool(result and result.get("ok"))
 
     # ========== 状态相关 ==========
     async def get_status(self, account_id: str) -> Optional[Dict[str, Any]]:
-        result = await self._request("GET", "/api/status", headers={"x-account-id": account_id})
+        """获取账号运行状态"""
+        result = await self._request(
+            "GET",
+            "/api/status",
+            headers={"x-account-id": account_id}
+        )
         if result and result.get("ok"):
             return result.get("data")
         return None
 
     async def get_scheduler_status(self) -> Optional[Dict[str, Any]]:
+        """获取调度器状态"""
         result = await self._request("GET", "/api/scheduler")
         if result and result.get("ok"):
             return result.get("data")
@@ -192,7 +256,11 @@ class QQFarmAPI:
 
     # ========== 日志相关 ==========
     async def get_account_logs(self, account_id: str, limit: int = 50) -> List:
-        result = await self._request("GET", f"/api/account-logs?accountId={account_id}&limit={limit}")
+        """获取账号日志"""
+        result = await self._request(
+            "GET",
+            f"/api/account-logs?accountId={account_id}&limit={limit}"
+        )
         if not result:
             return []
         if isinstance(result, list):
@@ -211,6 +279,7 @@ class QQFarmAPI:
         return []
 
     async def get_global_logs(self, limit: int = 50) -> List:
+        """获取全局日志"""
         result = await self._request("GET", f"/api/logs?limit={limit}")
         if not result or not result.get("ok"):
             return []
@@ -224,49 +293,84 @@ class QQFarmAPI:
 
     # ========== 设置相关 ==========
     async def get_settings(self, account_id: str) -> Optional[Dict[str, Any]]:
-        result = await self._request("GET", "/api/settings", headers={"x-account-id": account_id})
+        """获取账号设置"""
+        result = await self._request(
+            "GET",
+            "/api/settings",
+            headers={"x-account-id": account_id}
+        )
         if result and result.get("ok"):
             return result.get("data")
         return None
 
     async def save_settings(self, account_id: str, settings: Dict[str, Any]) -> bool:
-        result = await self._request("POST", "/api/settings/save", headers={"x-account-id": account_id}, json_data=settings)
+        """保存账号设置"""
+        result = await self._request(
+            "POST",
+            "/api/settings/save",
+            headers={"x-account-id": account_id},
+            json_data=settings
+        )
         return bool(result and result.get("ok"))
 
     async def set_automation(self, account_id: str, automation: Dict[str, Any]) -> bool:
-        result = await self._request("POST", "/api/automation", headers={"x-account-id": account_id}, json_data=automation)
+        """设置自动化配置"""
+        result = await self._request(
+            "POST",
+            "/api/automation",
+            headers={"x-account-id": account_id},
+            json_data=automation
+        )
         return bool(result and result.get("ok"))
 
     # ========== 用户相关 ==========
     async def get_users(self) -> List[Dict[str, Any]]:
+        """获取用户列表"""
         result = await self._request("GET", "/api/users")
         if result and result.get("ok"):
             return result.get("users", [])
         return []
 
     async def get_user(self, username: str) -> Optional[Dict[str, Any]]:
+        """获取用户详情"""
         result = await self._request("GET", f"/api/users/{username}")
         if result and result.get("ok"):
             return result.get("user")
         return None
 
     async def change_password(self, old_password: str, new_password: str) -> bool:
-        result = await self._request("POST", "/api/auth/change-password", json_data={"old_password": old_password, "new_password": new_password})
+        """修改密码"""
+        result = await self._request(
+            "POST",
+            "/api/auth/change-password",
+            json_data={"old_password": old_password, "new_password": new_password}
+        )
         return bool(result and result.get("ok"))
 
     # ========== 统计相关 ==========
     async def get_analytics(self) -> Optional[Dict[str, Any]]:
-        """获取统计信息"""
-        result = await self._request("GET", "/api/analytics")
+    """获取统计信息"""
+    result = await self._request("GET", "/api/analytics")
+    if result and result.get("ok"):
+        data = result.get("data")
+        if isinstance(data, list):
+            return data[0] if data else {}
+        return data
+    return None
+
+    async def get_stats(self) -> Optional[Dict[str, Any]]:
+        """获取统计摘要（使用外部 API）"""
+        if not self._api_available:
+            logger.warning("API not available, skipping get_stats")
+            return None
+        result = await self._request("GET", "/api/external/stats/summary", use_external=True)
         if result and result.get("ok"):
-            data = result.get("data")
-            if isinstance(data, list):
-                return data[0] if data else {}
-            return data
+            return result.get("data")
         return None
 
     # ========== 通知相关 ==========
     async def get_notifications(self) -> List[Dict[str, Any]]:
+        """获取通知列表"""
         result = await self._request("GET", "/api/notifications")
         if result and result.get("ok"):
             return result.get("data", [])
@@ -274,28 +378,33 @@ class QQFarmAPI:
 
     # ========== 健康检查 ==========
     async def ping(self) -> bool:
+        """Ping 测试"""
         result = await self._request("GET", "/api/ping")
         return bool(result and result.get("ok"))
 
     async def health_basic(self) -> Optional[Dict[str, Any]]:
+        """基础健康检查"""
         result = await self._request("GET", "/api/health/basic")
         if result and result.get("ok"):
             return result.get("data")
         return None
 
     async def health_dependencies(self) -> Optional[Dict[str, Any]]:
+        """依赖健康检查"""
         result = await self._request("GET", "/api/health/dependencies")
         if result and result.get("ok"):
             return result.get("data")
         return None
 
     async def health_runtime(self) -> Optional[Dict[str, Any]]:
+        """运行时健康检查"""
         result = await self._request("GET", "/api/health/runtime")
         if result and result.get("ok"):
             return result.get("data")
         return None
 
     async def get_service_profile(self) -> Optional[Dict[str, Any]]:
+        """获取服务配置"""
         result = await self._request("GET", "/api/system/service-profile")
         if result and result.get("ok"):
             return result.get("data")
@@ -303,6 +412,7 @@ class QQFarmAPI:
 
     # ========== 外部 API ==========
     async def get_external_accounts(self) -> List[Dict[str, Any]]:
+        """获取所有账号列表（外部 API，简化版）"""
         result = await self._request("GET", "/api/external/accounts", use_external=True)
         if not result or not result.get("ok"):
             return []
@@ -311,18 +421,21 @@ class QQFarmAPI:
         return items if isinstance(items, list) else []
 
     async def get_external_health(self) -> Optional[Dict[str, Any]]:
+        """获取系统健康状态（外部 API）"""
         result = await self._request("GET", "/api/external/health", use_external=True)
         if result and result.get("ok"):
             return result.get("data")
         return None
 
     async def get_external_stats(self) -> Optional[Dict[str, Any]]:
+        """获取统计摘要（外部 API）"""
         result = await self._request("GET", "/api/external/stats/summary", use_external=True)
         if result and result.get("ok"):
             return result.get("data")
         return None
 
     async def get_external_ping(self) -> Optional[Dict[str, Any]]:
+        """获取外部 Ping 信息"""
         result = await self._request("GET", "/api/external/ping", use_external=True)
         if result and result.get("ok"):
             return result.get("data")
@@ -330,51 +443,84 @@ class QQFarmAPI:
 
     # ========== 农场操作 ==========
     async def get_lands(self, account_id: str) -> Optional[Dict[str, Any]]:
-        result = await self._request("GET", "/api/lands", headers={"x-account-id": account_id})
+        """获取土地信息"""
+        result = await self._request(
+            "GET",
+            "/api/lands",
+            headers={"x-account-id": account_id}
+        )
         if result and result.get("ok"):
             return result.get("data")
         return None
 
     async def get_friends(self, account_id: str) -> List[Dict[str, Any]]:
-        result = await self._request("GET", "/api/friends", headers={"x-account-id": account_id})
+        """获取好友列表"""
+        result = await self._request(
+            "GET",
+            "/api/friends",
+            headers={"x-account-id": account_id}
+        )
         if result and result.get("ok"):
-            data = result.get("data", [])
-            if isinstance(data, list):
-                return data
-            elif isinstance(data, dict):
-                friends = data.get("friends", [])
-                return friends if isinstance(friends, list) else []
+            data = result.get("data", {})
+            friends = data.get("friends", [])
+            return friends if isinstance(friends, list) else []
         return []
 
     async def get_bag(self, account_id: str) -> List[Dict[str, Any]]:
-        result = await self._request("GET", "/api/bag", headers={"x-account-id": account_id})
+        """获取背包"""
+        result = await self._request(
+            "GET",
+            "/api/bag",
+            headers={"x-account-id": account_id}
+        )
         if result and result.get("ok"):
-            data = result.get("data", [])
-            if isinstance(data, list):
-                return data
-            elif isinstance(data, dict):
-                items = data.get("items", [])
-                return items if isinstance(items, list) else []
+            data = result.get("data", {})
+            items = data.get("items", [])
+            return items if isinstance(items, list) else []
         return []
 
     async def get_seeds(self, account_id: str) -> List[Dict[str, Any]]:
-        result = await self._request("GET", "/api/seeds", headers={"x-account-id": account_id})
+        """获取种子列表"""
+        result = await self._request(
+            "GET",
+            "/api/seeds",
+            headers={"x-account-id": account_id}
+        )
         if result and result.get("ok"):
-            data = result.get("data", [])
-            if isinstance(data, list):
-                return data
-            elif isinstance(data, dict):
-                seeds = data.get("seeds", [])
-                return seeds if isinstance(seeds, list) else []
+            data = result.get("data", {})
+            seeds = data.get("seeds", [])
+            return seeds if isinstance(seeds, list) else []
         return []
 
     async def do_farm_operation(self, account_id: str, op: str, params: Dict[str, Any] = None) -> bool:
+        """执行农场操作"""
         json_data = {"op": op}
         if params:
             json_data.update(params)
-        result = await self._request("POST", "/api/farm/operate", headers={"x-account-id": account_id}, json_data=json_data)
+        result = await self._request(
+            "POST",
+            "/api/farm/operate",
+            headers={"x-account-id": account_id},
+            json_data=json_data
+        )
         return bool(result and result.get("ok"))
 
     async def do_friend_operation(self, account_id: str, friend_gid: str, op: str, amount: int = 1) -> bool:
-        result = await self._request("POST", f"/api/friend/{friend_gid}/op", headers={"x-account-id": account_id}, json_data={"op": op, "amount": amount})
+        """执行好友操作"""
+        result = await self._request(
+            "POST",
+            f"/api/friend/{friend_gid}/op",
+            headers={"x-account-id": account_id},
+            json_data={"op": op, "amount": amount}
+        )
+        return bool(result and result.get("ok"))
+
+    # ========== 管理员分配账号 ==========
+    async def assign_account(self, account_id: str, username: str) -> bool:
+        """分配账号给指定用户（管理员接口）"""
+        result = await self._request(
+            "PUT",
+            f"/api/accounts/{account_id}/assign",
+            json_data={"username": username}
+        )
         return bool(result and result.get("ok"))
